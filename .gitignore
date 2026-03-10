@@ -1,0 +1,45 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go
+*.test
+*.out
+go.work
+go.work.sum
+vendor/
+
+# Build output
+/bin/
+/dist/
+/build/
+
+# IDE & editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.history/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+*.pem
+
+# Docker
+.docker/
+
+# Logs & temp
+*.log
+tmp/
+temp/
+*.tmp

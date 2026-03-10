@@ -1,0 +1,55 @@
+services:
+  # service name: db
+  db:
+    image: postgres:16
+    # these env variables are read by the postgres image on first startup to initialize the database.
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: orders
+    ports:
+      - "5432:5432" # left side is your machine's port, right side is container port.
+    # this is where postgres will store its data.
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d orders"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    image: migrate/migrate:latest
+    volumes:
+      - ./services/orders/migrations:/migrations
+    command:
+      [
+        "-path",
+        "/migrations",
+        "-database",
+        "postgres://postgres:postgres@db:5432/orders?sslmode=disable",
+        "up",
+      ]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  orders:
+    # compose will run docker build using Dockerfile in ./services/orders directory. It creates an image for your Go service.
+    build:
+      context: ./services/orders
+    environment:
+      PORT: "8080"
+      DATABASE_URL: "postgres://postgres:postgres@db:5432/orders?sslmode=disable"
+    ports:
+      - "8080:8080"
+    #  compose will start db container before orders container starts.
+    depends_on:
+      - db
+
+volumes:
+  # define a volume called dbdata. without this, data would be lost when the container is stopped.
+  dbdata:
+
+# docker compose up --build -> before starting the container, (re)build the image that come from "build:" section.
+# docker comppose up -> will usually reuse the last build image if it exists. And if you have any changes in the code you might not see them as you updated the code.
