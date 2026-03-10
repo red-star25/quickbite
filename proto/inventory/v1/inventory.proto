@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package inventory.v1;
 
-option go_package = "quickbite/proto/gen/go/inventory/v1;inventoryv1";
+option go_package = "github.com/red-star25/quickbite/proto/gen/go/inventory/v1;inventoryv1";
 
 service InventoryService {
     rpc ReserveStock(ReserveStockRequest) returns (ReserveStockResponse);

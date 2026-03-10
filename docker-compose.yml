@@ -39,16 +39,26 @@ services:
   orders:
     # compose will run docker build using Dockerfile in ./services/orders directory. It creates an image for your Go service.
     build:
-      context: ./services/orders
+      context: .
+      dockerfile: services/orders/Dockerfile
     environment:
       PORT: "8080"
       DATABASE_URL: "postgres://postgres:postgres@db:5432/orders?sslmode=disable"
+      INVENTORY_GRPC_ADDR: "inventory:9090"
     ports:
       - "8080:8080"
     #  compose will start db container before orders container starts.
     depends_on:
       migrate:
         condition: service_completed_successfully # this makes sure the migrations are completed successfully before starting the orders container.
+      inventory:
+        condition: service_started # this makes sure the inventory container is started before the orders container starts.
+  inventory:
+    build:
+      context: .
+      dockerfile: services/inventory/Dockerfile
+    ports:
+      - "9090:9090"
 
 volumes:
   # define a volume called dbdata. without this, data would be lost when the container is stopped.

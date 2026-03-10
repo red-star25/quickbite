@@ -13,8 +13,17 @@ type Order struct {
 	ID        int64
 	UserID    string
 	Note      string
+	Status    string
+	Sku       string
+	Quantity  int
 	CreatedAt time.Time
 }
+
+const (
+	StatusPending   = "PENDING"
+	StatusConfirmed = "CONFIRMED"
+	StatusCancelled = "CANCELLED"
+)
 
 /*
 OrderStore is the main store for the orders service.
@@ -28,24 +37,36 @@ func NewOrdersStore(db *pgxpool.Pool) *OrdersStore {
 	return &OrdersStore{db: db}
 }
 
-func (s *OrdersStore) Create(ctx context.Context, userID, note string) (int64, error) {
+func (s *OrdersStore) Create(ctx context.Context, userID, note, sku string, quantity int) (int64, error) {
 	var id int64
 	err := s.db.QueryRow(ctx,
-		`INSERT INTO orders (user_id, note) VALUES ($1, $2) RETURNING id`,
+		`INSERT INTO orders (user_id, note, status, sku, quantity) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
 		userID, note,
+		StatusPending,
+		sku,
+		quantity,
 	).Scan(&id)
 	return id, err
+}
+
+func (s *OrdersStore) UpdateStatus(ctx context.Context, id int64, status string) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE orders SET status = $1 WHERE id = $2`,
+		status,
+		id,
+	)
+	return err
 }
 
 func (s *OrdersStore) GetByID(ctx context.Context, id int64) (Order, error) {
 	var o Order
 	err := s.db.QueryRow(ctx,
-		`SELECT id, user_id, note, created_at FROM orders WHERE id = $1`,
+		`SELECT id, user_id, note, status, sku, quantity, created_at FROM orders WHERE id = $1`,
 		id,
-	).Scan(&o.ID, &o.UserID, &o.Note, &o.CreatedAt)
+	).Scan(&o.ID, &o.UserID, &o.Note, &o.Status, &o.Sku, &o.Quantity, &o.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Order{}, err
+			return Order{}, pgx.ErrNoRows
 		}
 		return Order{}, err
 	}

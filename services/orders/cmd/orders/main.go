@@ -5,10 +5,12 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"quickbite/orders/internal/db"
-	httpapi "quickbite/orders/internal/http"
-	"quickbite/orders/internal/store"
 	"strings"
+
+	"github.com/red-star25/quickbite/orders/internal/db"
+	httpapi "github.com/red-star25/quickbite/orders/internal/http"
+	inv "github.com/red-star25/quickbite/orders/internal/inventory"
+	"github.com/red-star25/quickbite/orders/internal/store"
 )
 
 func main() {
@@ -17,7 +19,8 @@ func main() {
 	port := getenv("PORT", "8080")
 	// dsn - Data Source Name. Its a database connection string.
 	dsn := getenv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/orders?sslmode=disable")
-
+	// inventory service address.
+	invAddr := getenv("INVENTORY_GRPC_ADDR", "localhost:9090")
 	/*
 		Connects to Postgres.
 		"With retry" means it keepstrying for a bit if the DB isn't ready yet.
@@ -26,8 +29,15 @@ func main() {
 	pool := db.MustConnectWithRetry(dsn)
 	defer pool.Close()
 
+	// Create a new inventory client.
+	invClient, err := inv.New(invAddr)
+	if err != nil {
+		log.Fatalf("failed to create inventory client: %v", err)
+	}
+	defer invClient.Close()
+
 	orderStore := store.NewOrdersStore(pool)
-	srv := httpapi.NewServer(orderStore)
+	srv := httpapi.NewServer(orderStore, invClient)
 
 	addr := ":" + port
 	log.Printf("orders service listening on %s", addr)

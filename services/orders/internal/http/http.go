@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,16 +12,20 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
-	"quickbite/orders/internal/store"
+	inv "github.com/red-star25/quickbite/orders/internal/inventory"
+	"github.com/red-star25/quickbite/orders/internal/store"
 )
 
 type Server struct {
 	store *store.OrdersStore
+	inv   *inv.Client
 }
 
-func NewServer(store *store.OrdersStore) *Server {
-	return &Server{store: store}
+func NewServer(store *store.OrdersStore, invClient *inv.Client) *Server {
+	return &Server{store: store, inv: invClient}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -38,8 +43,10 @@ func (s *Server) Routes() http.Handler {
 }
 
 type createOrderRequest struct {
-	UserID string `json:"userId"`
-	Note   string `json:"note"`
+	UserID   string `json:"userId"`
+	Sku      string `json:"sku"`
+	Quantity int    `json:"quantity"`
+	Note     string `json:"note"`
 }
 
 type createOrderResponse struct {
@@ -54,19 +61,66 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req.UserID = strings.TrimSpace(req.UserID)
+	req.Sku = strings.TrimSpace(req.Sku)
+
 	if req.UserID == "" {
 		http.Error(w, "userId is required", http.StatusBadRequest)
+		return
+	}
+	if req.Sku == "" {
+		http.Error(w, "sku is required", http.StatusBadRequest)
+		return
+	}
+	if req.Quantity <= 0 {
+		http.Error(w, "quantity must be greater than 0", http.StatusBadRequest)
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
-	id, err := s.store.Create(ctx, req.UserID, req.Note)
+	// Create a new order in the database.
+	id, err := s.store.Create(ctx, req.UserID, req.Note, req.Sku, req.Quantity)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
+
+	// Once the order is created, we need to reserve the stock for the product.
+	err = s.inv.Reserve(ctx, req.Sku, int32(req.Quantity))
+	if err != nil {
+		_ = s.store.UpdateStatus(ctx, id, store.StatusCancelled)
+		// If the inventory reserve fails, we need to update the order status to cancelled.
+
+		st, ok := status.FromError(err)
+		log.Printf("inventory reserve error: ok=%v code=%v msg=%q err=%T %v", ok, st.Code(), st.Message(), err, err)
+		if ok {
+			switch st.Code() {
+			case codes.FailedPrecondition, codes.ResourceExhausted:
+				// insufficient stock / cannot reserve due to current state
+				http.Error(w, "not enough stock", http.StatusConflict) // 409
+				return
+			case codes.InvalidArgument:
+				http.Error(w, st.Message(), http.StatusBadRequest) // 400
+				return
+			case codes.DeadlineExceeded:
+				http.Error(w, "inventory timeout", http.StatusGatewayTimeout) // 504
+				return
+			case codes.Unavailable:
+				http.Error(w, "inventory unavailable", http.StatusServiceUnavailable) // 503
+				return
+			default:
+				http.Error(w, "inventory error", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		http.Error(w, "inventory error", http.StatusInternalServerError)
+		return
+	}
+
+	// Once the stock is reserved, we need to update the order status to confirmed.
+	_ = s.store.UpdateStatus(ctx, id, store.StatusConfirmed)
 
 	writeJSON(w, http.StatusCreated, createOrderResponse{ID: id})
 }
@@ -75,6 +129,9 @@ type getOrderResponse struct {
 	ID        int64  `json:"id"`
 	UserID    string `json:"userId"`
 	Note      string `json:"note"`
+	Status    string `json:"status"`
+	Sku       string `json:"sku"`
+	Quantity  int    `json:"quantity"`
 	CreatedAt string `json:"createdAt"`
 }
 
@@ -103,6 +160,9 @@ func (s *Server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
 		ID:        o.ID,
 		UserID:    o.UserID,
 		Note:      o.Note,
+		Status:    o.Status,
+		Sku:       o.Sku,
+		Quantity:  o.Quantity,
 		CreatedAt: o.CreatedAt.UTC().Format(time.RFC3339),
 	}
 	writeJSON(w, http.StatusOK, resp)

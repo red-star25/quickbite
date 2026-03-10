@@ -128,7 +128,7 @@ const file_inventory_v1_inventory_proto_rawDesc = "" +
 	"\x14ReserveStockResponse\x12\x1a\n" +
 	"\breserved\x18\x01 \x01(\bR\breserved2i\n" +
 	"\x10InventoryService\x12U\n" +
-	"\fReserveStock\x12!.inventory.v1.ReserveStockRequest\x1a\".inventory.v1.ReserveStockResponseB1Z/quickbite/proto/gen/go/inventory/v1;inventoryv1b\x06proto3"
+	"\fReserveStock\x12!.inventory.v1.ReserveStockRequest\x1a\".inventory.v1.ReserveStockResponseBGZEgithub.com/red-star25/quickbite/proto/gen/go/inventory/v1;inventoryv1b\x06proto3"
 
 var (
 	file_inventory_v1_inventory_proto_rawDescOnce sync.Once
