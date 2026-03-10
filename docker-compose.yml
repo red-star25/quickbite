@@ -12,16 +12,18 @@ services:
     # this is where postgres will store its data.
     volumes:
       - dbdata:/var/lib/postgresql/data
+    # healthcheck is Compose asking: Are you ready?
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d orders"]
-      interval: 2s
-      timeout: 3s
-      retries: 30
+      test: ["CMD-SHELL", "pg_isready -U postgres -d orders"] # pg_isready checks if the DB is ready to accept connections.
+      interval: 2s # check every 2 seconds.
+      timeout: 3s # each check can take up to 3 seconds.
+      retries: 30 # try 30 times before giving up.
 
+  # this is a one time job container that runs the migrations.
   migrate:
-    image: migrate/migrate:latest
+    image: migrate/migrate:latest # popular migration CLI
     volumes:
-      - ./services/orders/migrations:/migrations
+      - ./services/orders/migrations:/migrations # mounts your local migrations folder to the container.
     command:
       [
         "-path",
@@ -32,7 +34,7 @@ services:
       ]
     depends_on:
       db:
-        condition: service_healthy
+        condition: service_healthy # this makes sure the db is ready before running the migrations.
 
   orders:
     # compose will run docker build using Dockerfile in ./services/orders directory. It creates an image for your Go service.
@@ -45,7 +47,8 @@ services:
       - "8080:8080"
     #  compose will start db container before orders container starts.
     depends_on:
-      - db
+      migrate:
+        condition: service_completed_successfully # this makes sure the migrations are completed successfully before starting the orders container.
 
 volumes:
   # define a volume called dbdata. without this, data would be lost when the container is stopped.

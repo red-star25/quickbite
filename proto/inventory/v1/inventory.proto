@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package inventory.v1;
+
+option go_package = "quickbite/proto/gen/go/inventory/v1;inventoryv1";
+
+service InventoryService {
+    rpc ReserveStock(ReserveStockRequest) returns (ReserveStockResponse);
+}
+
+message ReserveStockRequest {
+    string sku = 1;
+    int32 quantity = 2;
+}
+
+message ReserveStockResponse {
+    bool reserved = 1;
+}
