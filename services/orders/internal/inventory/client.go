@@ -15,10 +15,12 @@ type Client struct {
 	api  inventoryv1.InventoryServiceClient
 }
 
+// New creates a new inventory client.
 func New(addr string) (*Client, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
+	// Create a new gRPC connection to the inventory service.
 	conn, err := grpc.DialContext(ctx, addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
