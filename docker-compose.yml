@@ -45,6 +45,7 @@ services:
       PORT: "8080"
       DATABASE_URL: "postgres://postgres:postgres@db:5432/orders?sslmode=disable"
       INVENTORY_GRPC_ADDR: "inventory:9090"
+      KAFKA_BROKERS: "redpanda:9092"
     ports:
       - "8080:8080"
     #  compose will start db container before orders container starts.
@@ -57,8 +58,41 @@ services:
     build:
       context: .
       dockerfile: services/inventory/Dockerfile
+    environment:
+      KAFKA_BROKERS: "redpanda:9092"
     ports:
       - "9090:9090"
+
+  # Redpanda is like Kafka: a server that lets services publish events and other services consume events.
+  redpanda:
+    image: redpandadata/redpanda:latest
+    # this is the command run inside the container.
+    command:
+      - redpanda
+      - start
+      - --overprovisioned # optimize redpanda in a small dev container
+      - --smp
+      - "1" # use 1 CPU core
+      - --memory
+      - 1G # give redpanda upto 1GB of memory
+      - --reserve-memory
+      - 0M # reserve 0MB for internal use
+      - --node-id
+      - "0" # this node ID is 0
+      - --check=false # skips some startup checks helps in Docker/dev environment.
+      # this tells redpanda to listen on both internal and external endpoints.
+      - --kafka-addr
+      # internal://0.0.0.0:9092 -> used by other containers in the same Docker network. port 9092 is the default Kafka port.
+      # external://0.0.0.0:19092 -> used by your laptop (host machine). mapped to host port 19092 via ports.
+      - internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr
+      # this is the address redpanda tells clients to use.
+      # we are telling here internal clients should use redpanda:9092
+      # and external clients should use localhost:19092
+      - internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092" # exposes Kafka externally so your laptop tools can connect to localhost:19092.
+      - "9644:9644" # exposes Redpanda's admin/metrics API
 
 volumes:
   # define a volume called dbdata. without this, data would be lost when the container is stopped.
