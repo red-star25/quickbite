@@ -2,9 +2,10 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,20 +13,18 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
-	inv "github.com/red-star25/quickbite/orders/internal/inventory"
+	"github.com/red-star25/quickbite/orders/internal/kafkabus"
 	"github.com/red-star25/quickbite/orders/internal/store"
 )
 
 type Server struct {
 	store *store.OrdersStore
-	inv   *inv.Client
+	bus   *kafkabus.Bus
 }
 
-func NewServer(store *store.OrdersStore, invClient *inv.Client) *Server {
-	return &Server{store: store, inv: invClient}
+func NewServer(store *store.OrdersStore, bus *kafkabus.Bus) *Server {
+	return &Server{store: store, bus: bus}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -86,43 +85,69 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Once the order is created, we need to reserve the stock for the product.
-	err = s.inv.Reserve(ctx, req.Sku, int32(req.Quantity))
-	if err != nil {
-		_ = s.store.UpdateStatus(ctx, id, store.StatusCancelled)
-		// If the inventory reserve fails, we need to update the order status to cancelled.
+	evt := kafkabus.OrderCreated{
+		EventID:  newEventID(),
+		Type:     "OrderCreated",
+		Time:     time.Now().UTC(),
+		OrderID:  id,
+		UserID:   req.UserID,
+		Sku:      req.Sku,
+		Quantity: req.Quantity,
+	}
 
-		st, ok := status.FromError(err)
-		log.Printf("inventory reserve error: ok=%v code=%v msg=%q err=%T %v", ok, st.Code(), st.Message(), err, err)
-		if ok {
-			switch st.Code() {
-			case codes.FailedPrecondition, codes.ResourceExhausted:
-				// insufficient stock / cannot reserve due to current state
-				http.Error(w, "not enough stock", http.StatusConflict) // 409
-				return
-			case codes.InvalidArgument:
-				http.Error(w, st.Message(), http.StatusBadRequest) // 400
-				return
-			case codes.DeadlineExceeded:
-				http.Error(w, "inventory timeout", http.StatusGatewayTimeout) // 504
-				return
-			case codes.Unavailable:
-				http.Error(w, "inventory unavailable", http.StatusServiceUnavailable) // 503
-				return
-			default:
-				http.Error(w, "inventory error", http.StatusInternalServerError)
-				return
-			}
-		}
-
-		http.Error(w, "inventory error", http.StatusInternalServerError)
+	if err := kafkabus.PublishOrderCreated(ctx, s.bus.OrderWriter, evt); err != nil {
+		http.Error(w, "kafka publish failed", http.StatusServiceUnavailable)
 		return
 	}
 
+	// =============================== INVENTORY RESERVE ===============================
+	// // Once the order is created, we need to reserve the stock for the product.
+	// err = s.inv.Reserve(ctx, req.Sku, int32(req.Quantity))
+	// if err != nil {
+	// 	_ = s.store.UpdateStatus(ctx, id, store.StatusCancelled)
+	// 	// If the inventory reserve fails, we need to update the order status to cancelled.
+
+	// 	st, ok := status.FromError(err)
+	// 	log.Printf("inventory reserve error: ok=%v code=%v msg=%q err=%T %v", ok, st.Code(), st.Message(), err, err)
+	// 	if ok {
+	// 		switch st.Code() {
+	// 		case codes.FailedPrecondition, codes.ResourceExhausted:
+	// 			// insufficient stock / cannot reserve due to current state
+	// 			http.Error(w, "not enough stock", http.StatusConflict) // 409
+	// 			return
+	// 		case codes.InvalidArgument:
+	// 			http.Error(w, st.Message(), http.StatusBadRequest) // 400
+	// 			return
+	// 		case codes.DeadlineExceeded:
+	// 			http.Error(w, "inventory timeout", http.StatusGatewayTimeout) // 504
+	// 			return
+	// 		case codes.Unavailable:
+	// 			http.Error(w, "inventory unavailable", http.StatusServiceUnavailable) // 503
+	// 			return
+	// 		default:
+	// 			http.Error(w, "inventory error", http.StatusInternalServerError)
+	// 			return
+	// 		}
+	// 	}
+
+	// 	http.Error(w, "inventory error", http.StatusInternalServerError)
+	// 	return
+	// }
+
 	// Once the stock is reserved, we need to update the order status to confirmed.
-	_ = s.store.UpdateStatus(ctx, id, store.StatusConfirmed)
+	// _ = s.store.UpdateStatus(ctx, id, store.StatusConfirmed)
+	// ===================================================================================
 
 	writeJSON(w, http.StatusCreated, createOrderResponse{ID: id})
+}
+
+func newEventID() string {
+	b := make([]byte, 16)
+	_, err := rand.Read(b)
+	if err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
 }
 
 type getOrderResponse struct {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"github.com/red-star25/quickbite/orders/internal/db"
 	httpapi "github.com/red-star25/quickbite/orders/internal/http"
 	inv "github.com/red-star25/quickbite/orders/internal/inventory"
+	"github.com/red-star25/quickbite/orders/internal/kafkabus"
 	"github.com/red-star25/quickbite/orders/internal/store"
 )
 
@@ -37,7 +39,25 @@ func main() {
 	defer invClient.Close()
 
 	orderStore := store.NewOrdersStore(pool)
-	srv := httpapi.NewServer(orderStore, invClient)
+
+	brokers := kafkabus.BrokersFromEnv(getenv("KAFKA_BROKERS", "localhost:19092"))
+	bus := kafkabus.New(brokers)
+	defer bus.Close()
+
+	ctx := context.Background()
+
+	go kafkabus.ConsumeInventoryResults(ctx, bus.InventoryReader, func(evt kafkabus.InventoryResult) error {
+		switch evt.Type {
+		case "InventoryReserved":
+			return orderStore.UpdateStatus(ctx, evt.OrderID, store.StatusConfirmed)
+		case "InventoryRejected":
+			return orderStore.UpdateStatus(ctx, evt.OrderID, store.StatusCancelled)
+		default:
+			return nil
+		}
+	})
+
+	srv := httpapi.NewServer(orderStore, bus)
 
 	addr := ":" + port
 	log.Printf("orders service listening on %s", addr)
