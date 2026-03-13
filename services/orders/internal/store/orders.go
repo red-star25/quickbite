@@ -72,3 +72,42 @@ func (s *OrdersStore) GetByID(ctx context.Context, id int64) (Order, error) {
 	}
 	return o, nil
 }
+
+func (s *OrdersStore) Begin(ctx context.Context) (pgx.Tx, error) {
+	return s.db.Begin(ctx)
+}
+
+func (s *OrdersStore) CreatePendingTx(ctx context.Context, tx pgx.Tx, userID, note, sku string, quantity int) (int64, error) {
+	var id int64
+	err := tx.QueryRow(ctx,
+		`INSERT INTO orders (user_id, note, status, sku, quantity) 
+		VALUES ($1, $2, $3, $4, $5) 
+		RETURNING id`,
+		userID, note,
+		StatusPending,
+		sku,
+		quantity,
+	).Scan(&id)
+	return id, err
+}
+
+func (s *OrdersStore) UpdateStatusTx(ctx context.Context, tx pgx.Tx, id int64, status string) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE orders SET status = $1 WHERE id = $2`,
+		status,
+		id,
+	)
+	return err
+}
+
+func (s *OrdersStore) MarkProcessedEventTx(ctx context.Context, tx pgx.Tx, eventID string) (bool, error) {
+	tag, err := tx.Exec(ctx,
+		`INSERT INTO processed_events (event_id) VALUES ($1) 
+		ON CONFLICT (event_id) DO NOTHING`,
+		eventID,
+	)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}

@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/red-star25/quickbite/orders/internal/kafkabus"
+	"github.com/red-star25/quickbite/orders/internal/outbox"
 	"github.com/red-star25/quickbite/orders/internal/store"
 )
 
@@ -75,11 +76,18 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
+	tx, err := s.store.Begin(ctx)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	// Create a new order in the database.
-	id, err := s.store.Create(ctx, req.UserID, req.Note, req.Sku, req.Quantity)
+	id, err := s.store.CreatePendingTx(ctx, tx, req.UserID, req.Note, req.Sku, int(req.Quantity))
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
@@ -95,8 +103,24 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		Quantity: req.Quantity,
 	}
 
-	if err := kafkabus.PublishOrderCreated(ctx, s.bus.OrderWriter, evt); err != nil {
-		http.Error(w, "kafka publish failed", http.StatusServiceUnavailable)
+	payload, err := json.Marshal(evt)
+	if err != nil {
+		http.Error(w, "json marshal failed", http.StatusInternalServerError)
+		return
+	}
+
+	if err := outbox.InsertTx(ctx, tx, outbox.Event{
+		EventID: evt.EventID,
+		Topic:   "orders.v1",
+		Key:     strconv.FormatInt(id, 10),
+		Payload: payload,
+	}); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
 

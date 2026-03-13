@@ -27,6 +27,8 @@ type inventoryServer struct {
 	mu sync.Mutex
 	// stock map is the inventory of the products. We are using local map right now because we are not using a database. In future we can use a database to store the inventory.
 	stock map[string]int32
+
+	reservation map[int64]kafkabus.InventoryResult
 }
 
 // Creating constructor function to create a new inventory server.

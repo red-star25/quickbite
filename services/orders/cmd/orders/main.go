@@ -12,6 +12,7 @@ import (
 	httpapi "github.com/red-star25/quickbite/orders/internal/http"
 	inv "github.com/red-star25/quickbite/orders/internal/inventory"
 	"github.com/red-star25/quickbite/orders/internal/kafkabus"
+	"github.com/red-star25/quickbite/orders/internal/outbox"
 	"github.com/red-star25/quickbite/orders/internal/store"
 )
 
@@ -44,16 +45,37 @@ func main() {
 	bus := kafkabus.New(brokers)
 	defer bus.Close()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pub := &outbox.Publisher{
+		DB:     pool,
+		Writer: bus.OrderWriter,
+	}
+	go pub.Run(ctx)
 
 	go kafkabus.ConsumeInventoryResults(ctx, bus.InventoryReader, func(evt kafkabus.InventoryResult) error {
+		tx, err := orderStore.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+
+		newEvt, err := orderStore.MarkProcessedEventTx(ctx, tx, evt.EventID)
+		if err != nil {
+			return err
+		}
+		if !newEvt {
+			return nil
+		}
+
 		switch evt.Type {
 		case "InventoryReserved":
-			return orderStore.UpdateStatus(ctx, evt.OrderID, store.StatusConfirmed)
+			return orderStore.UpdateStatusTx(ctx, tx, evt.OrderID, store.StatusConfirmed)
 		case "InventoryRejected":
-			return orderStore.UpdateStatus(ctx, evt.OrderID, store.StatusCancelled)
+			return orderStore.UpdateStatusTx(ctx, tx, evt.OrderID, store.StatusCancelled)
 		default:
-			return nil
+			return tx.Commit(ctx)
 		}
 	})
 
