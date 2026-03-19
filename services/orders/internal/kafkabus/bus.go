@@ -15,9 +15,13 @@ type Bus struct {
 	OrderWriter *kafka.Writer
 	// Kafka consumer -> uses this to read messages from topic inventory.v1
 	InventoryReader *kafka.Reader
+	DLQWriter       *kafka.Writer
+	ConsumerGroup   string
 }
 
 func New(brokers []string) *Bus { // "brokers []string" is a list of broker addresses.
+	group := "orders-service"
+
 	return &Bus{
 		OrderWriter: &kafka.Writer{
 			Addr:     kafka.TCP(brokers...), // tells the writer how to connect to kafka. "brokers..." means spread the brokers
@@ -32,10 +36,16 @@ func New(brokers []string) *Bus { // "brokers []string" is a list of broker addr
 				If you run 3 instances with the same group ID -> Kafka will split partitions among them.
 				GroupID means -> these instances are the same team, split the work.
 			*/
-			GroupID:  "orders-service",
+			GroupID:  group,
 			MinBytes: 1,
 			MaxBytes: 10e6,
 		}),
+		DLQWriter: &kafka.Writer{
+			Addr:     kafka.TCP(brokers...),
+			Topic:    "orders.dlq.v1",
+			Balancer: &kafka.Hash{},
+		},
+		ConsumerGroup: group,
 	}
 }
 
@@ -57,6 +67,7 @@ func BrokersFromEnv(s string) []string {
 
 func (b *Bus) Close() error {
 	_ = b.InventoryReader.Close()
+	_ = b.DLQWriter.Close()
 	return b.OrderWriter.Close()
 }
 

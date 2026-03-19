@@ -54,14 +54,51 @@ services:
         condition: service_completed_successfully # this makes sure the migrations are completed successfully before starting the orders container.
       inventory:
         condition: service_started # this makes sure the inventory container is started before the orders container starts.
+
+  inventory-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: inventory
+    ports:
+      - "5433:5432" # optional: lets your laptop connect on 5433
+    volumes:
+      - inventorydbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d inventory"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate-inventory:
+    image: migrate/migrate:v4.17.1
+    volumes:
+      - ./services/inventory/migrations:/migrations
+    command:
+      [
+        "-path",
+        "/migrations",
+        "-database",
+        "postgres://postgres:postgres@inventory-db:5432/inventory?sslmode=disable",
+        "up",
+      ]
+    depends_on:
+      inventory-db:
+        condition: service_healthy
+
   inventory:
     build:
       context: .
       dockerfile: services/inventory/Dockerfile
     environment:
       KAFKA_BROKERS: "redpanda:9092"
+      DATABASE_URL: "postgres://postgres:postgres@inventory-db:5432/inventory?sslmode=disable"
     ports:
       - "9090:9090"
+    depends_on:
+      migrate-inventory:
+        condition: service_completed_successfully
 
   # Redpanda is like Kafka: a server that lets services publish events and other services consume events.
   redpanda:
@@ -97,6 +134,7 @@ services:
 volumes:
   # define a volume called dbdata. without this, data would be lost when the container is stopped.
   dbdata:
+  inventorydbdata:
 
 # docker compose up --build -> before starting the container, (re)build the image that come from "build:" section.
 # docker comppose up -> will usually reuse the last build image if it exists. And if you have any changes in the code you might not see them as you updated the code.

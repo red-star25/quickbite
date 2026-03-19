@@ -7,16 +7,19 @@ import (
 )
 
 type Bus struct {
-	OrderReader     *kafka.Reader
+	OrdersReader    *kafka.Reader
 	InventoryWriter *kafka.Writer
+	DLQWriter       *kafka.Writer
+	ConsumerGroup   string
 }
 
 func New(brokers []string) *Bus {
+	group := "inventory-service"
 	return &Bus{
-		OrderReader: kafka.NewReader(kafka.ReaderConfig{
+		OrdersReader: kafka.NewReader(kafka.ReaderConfig{
 			Brokers:  brokers,
 			Topic:    "orders.v1",
-			GroupID:  "inventory-service",
+			GroupID:  group,
 			MinBytes: 1,
 			MaxBytes: 10e6,
 		}),
@@ -25,6 +28,12 @@ func New(brokers []string) *Bus {
 			Topic:    "inventory.v1",
 			Balancer: &kafka.Hash{},
 		},
+		DLQWriter: &kafka.Writer{
+			Addr:     kafka.TCP(brokers...),
+			Topic:    "inventory.dlq.v1",
+			Balancer: &kafka.Hash{},
+		},
+		ConsumerGroup: group,
 	}
 }
 
@@ -44,6 +53,7 @@ func BrokersFromEnv(s string) []string {
 }
 
 func (b *Bus) Close() error {
-	_ = b.OrderReader.Close()
+	_ = b.OrdersReader.Close()
+	_ = b.DLQWriter.Close()
 	return b.InventoryWriter.Close()
 }

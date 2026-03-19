@@ -31,14 +31,14 @@ func (p *Publisher) Run(ctx context.Context) {
 func (p *Publisher) publishBatch(ctx context.Context) {
 	tx, err := p.DB.Begin(ctx)
 	if err != nil {
-		log.Printf("outbox begin tx failed: %v", err)
+		log.Printf("inventory outbox begin tx failed: %v", err)
 		return
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	events, err := FetchUnpublishedForUpdate(ctx, tx, 25)
 	if err != nil {
-		log.Printf("outbox fetch failed: %v", err)
+		log.Printf("inventory outbox fetch failed: %v", err)
 		return
 	}
 	if len(events) == 0 {
@@ -48,8 +48,6 @@ func (p *Publisher) publishBatch(ctx context.Context) {
 
 	for _, e := range events {
 		writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		// Topic is already configured on the Writer; setting it here causes
-		// kafka-go to reject the message. We only set key and value.
 		err := p.Writer.WriteMessages(writeCtx, kafka.Message{
 			Key:   []byte(e.Key),
 			Value: e.Payload,
@@ -57,17 +55,18 @@ func (p *Publisher) publishBatch(ctx context.Context) {
 		cancel()
 
 		if err != nil {
-			log.Printf("outbox write message failed: %v", err)
+			// rollback => events stay unpublished, retry later
+			log.Printf("inventory outbox kafka publish failed: %v", err)
 			return
 		}
+
 		if err := MarkPublishedTx(ctx, tx, e.ID); err != nil {
-			log.Printf("outbox mark published failed: %v", err)
+			log.Printf("inventory outbox mark published failed: %v", err)
 			return
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		log.Printf("outbox commit failed: %v", err)
-		return
+		log.Printf("inventory outbox commit failed: %v", err)
 	}
 }

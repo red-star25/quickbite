@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -92,12 +93,14 @@ func (s *OrdersStore) CreatePendingTx(ctx context.Context, tx pgx.Tx, userID, no
 }
 
 func (s *OrdersStore) UpdateStatusTx(ctx context.Context, tx pgx.Tx, id int64, status string) error {
-	_, err := tx.Exec(ctx,
-		`UPDATE orders SET status = $1 WHERE id = $2`,
-		status,
-		id,
-	)
-	return err
+	tag, err := tx.Exec(ctx, `UPDATE orders SET status = $2 WHERE id = $1`, id, status)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("order %d not found (rows affected=%d)", id, tag.RowsAffected())
+	}
+	return nil
 }
 
 func (s *OrdersStore) MarkProcessedEventTx(ctx context.Context, tx pgx.Tx, eventID string) (bool, error) {

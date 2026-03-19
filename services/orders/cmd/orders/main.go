@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/red-star25/quickbite/orders/internal/db"
+	"github.com/red-star25/quickbite/orders/internal/failures"
 	httpapi "github.com/red-star25/quickbite/orders/internal/http"
 	inv "github.com/red-star25/quickbite/orders/internal/inventory"
 	"github.com/red-star25/quickbite/orders/internal/kafkabus"
@@ -54,29 +55,60 @@ func main() {
 	}
 	go pub.Run(ctx)
 
-	go kafkabus.ConsumeInventoryResults(ctx, bus.InventoryReader, func(evt kafkabus.InventoryResult) error {
+	fail := failures.New(pool)
+
+	go kafkabus.ConsumeInventoryResults(ctx, bus.InventoryReader, bus.ConsumerGroup, bus.DLQWriter, fail, func(evt kafkabus.InventoryResult) error {
 		tx, err := orderStore.Begin(ctx)
 		if err != nil {
 			return err
 		}
-		defer func() { _ = tx.Rollback(ctx) }()
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback(ctx)
+			}
+		}()
 
+		log.Printf("orders: inventory handler starting eventId=%s type=%s orderId=%d reserved=%v", evt.EventID, evt.Type, evt.OrderID, evt.Reserved)
 		newEvt, err := orderStore.MarkProcessedEventTx(ctx, tx, evt.EventID)
 		if err != nil {
 			return err
 		}
+		log.Printf("orders: inventory handler processed_event_insert eventId=%s inserted=%v", evt.EventID, newEvt)
 		if !newEvt {
+			// Event was already processed in a prior successful transaction.
+			// Commit to close out this (read-only) transaction.
+			if err := tx.Commit(ctx); err != nil {
+				return err
+			}
+			committed = true
+			log.Printf("orders: inventory handler skipping DB updates for already-processed eventId=%s", evt.EventID)
 			return nil
 		}
 
+		// At this point we know the event row was inserted into processed_events.
 		switch evt.Type {
 		case "InventoryReserved":
-			return orderStore.UpdateStatusTx(ctx, tx, evt.OrderID, store.StatusConfirmed)
+			if err := orderStore.UpdateStatusTx(ctx, tx, evt.OrderID, store.StatusConfirmed); err != nil {
+				return err
+			}
+			log.Printf("orders: inventory handler updated order status orderId=%d status=%s", evt.OrderID, store.StatusConfirmed)
 		case "InventoryRejected":
-			return orderStore.UpdateStatusTx(ctx, tx, evt.OrderID, store.StatusCancelled)
+			if err := orderStore.UpdateStatusTx(ctx, tx, evt.OrderID, store.StatusCancelled); err != nil {
+				return err
+			}
+			log.Printf("orders: inventory handler updated order status orderId=%d status=%s", evt.OrderID, store.StatusCancelled)
 		default:
-			return tx.Commit(ctx)
+			// Defensive: shouldn't happen because ConsumeInventoryResults already validates evt.Type.
+			return errors.New("invalid inventory event type: " + evt.Type)
 		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		committed = true
+		log.Printf("orders: inventory handler committed tx eventId=%s orderId=%d", evt.EventID, evt.OrderID)
+		return nil
 	})
 
 	srv := httpapi.NewServer(orderStore, bus)
