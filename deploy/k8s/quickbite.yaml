@@ -1,0 +1,495 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: quickbite
+---
+# ---------------------------
+# Orders DB (Postgres)
+# ---------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-db
+  namespace: quickbite
+spec:
+  selector:
+    app: orders-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: orders-db
+  namespace: quickbite
+spec:
+  serviceName: orders-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orders-db
+  template:
+    metadata:
+      labels:
+        app: orders-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              value: postgres
+            - name: POSTGRES_DB
+              value: orders
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U postgres -d orders"]
+            initialDelaySeconds: 3
+            periodSeconds: 3
+          volumeMounts:
+            - name: ordersdbdata
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: ordersdbdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+# ---------------------------
+# Inventory DB (Postgres)
+# ---------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-db
+  namespace: quickbite
+spec:
+  selector:
+    app: inventory-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: inventory-db
+  namespace: quickbite
+spec:
+  serviceName: inventory-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inventory-db
+  template:
+    metadata:
+      labels:
+        app: inventory-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              value: postgres
+            - name: POSTGRES_DB
+              value: inventory
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U postgres -d inventory"]
+            initialDelaySeconds: 3
+            periodSeconds: 3
+          volumeMounts:
+            - name: inventorydbdata
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: inventorydbdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+# ---------------------------
+# Redpanda (Kafka-compatible)
+# ---------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: redpanda
+  namespace: quickbite
+spec:
+  selector:
+    app: redpanda
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: 9092
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redpanda
+  namespace: quickbite
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redpanda
+  template:
+    metadata:
+      labels:
+        app: redpanda
+    spec:
+      containers:
+        - name: redpanda
+          image: redpandadata/redpanda:latest
+          args:
+            - redpanda
+            - start
+            - --overprovisioned
+            - --smp
+            - "1"
+            - --memory
+            - 1G
+            - --reserve-memory
+            - 0M
+            - --node-id
+            - "0"
+            - --check=false
+            - --kafka-addr
+            - 0.0.0.0:9092
+            - --advertise-kafka-addr
+            - redpanda:9092
+          ports:
+            - containerPort: 9092
+---
+# Create Kafka topics (one-time Job)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-topics
+  namespace: quickbite
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: topics
+          image: redpandadata/redpanda:latest
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "Waiting for Redpanda..."
+              for i in $(seq 1 60); do
+                rpk cluster info --brokers redpanda:9092 >/dev/null 2>&1 && break
+                sleep 2
+              done
+              echo "Creating topics (safe if exists)..."
+              rpk topic create orders.v1 -p 3 -r 1 --brokers redpanda:9092 || true
+              rpk topic create inventory.v1 -p 3 -r 1 --brokers redpanda:9092 || true
+              rpk topic create orders.dlq.v1 -p 1 -r 1 --brokers redpanda:9092 || true
+              rpk topic create inventory.dlq.v1 -p 1 -r 1 --brokers redpanda:9092 || true
+              echo "Done."
+---
+# ---------------------------
+# Orders migrations ConfigMap (UP only)
+# ---------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orders-migrations
+  namespace: quickbite
+data:
+  000001_create_orders_table.up.sql: |
+    CREATE TABLE IF NOT EXISTS orders (
+      id BIGSERIAL PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);
+  000002_add_order_fields.up.sql: |
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'PENDING';
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS sku TEXT NOT NULL DEFAULT '';
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity INT NOT NULL DEFAULT 1;
+    CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+    CREATE INDEX IF NOT EXISTS idx_orders_sku ON orders(sku);
+  000003_outbox_and_processed_events.up.sql: |
+    CREATE TABLE IF NOT EXISTS outbox_events (
+      id BIGSERIAL PRIMARY KEY,
+      event_id TEXT NOT NULL UNIQUE,
+      topic TEXT NOT NULL,
+      key TEXT NOT NULL,
+      payload BYTEA NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      published_at TIMESTAMPTZ NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_outbox_unpublished
+      ON outbox_events(id)
+      WHERE published_at IS NULL;
+
+    CREATE TABLE IF NOT EXISTS processed_events (
+      event_id TEXT PRIMARY KEY,
+      processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  000004_consumer_failures.up.sql: |
+    CREATE TABLE IF NOT EXISTS consumer_failures (
+      topic TEXT NOT NULL,
+      "partition" INT NOT NULL,
+      "offset" BIGINT NOT NULL,
+      group_id TEXT NOT NULL,
+      attempts INT NOT NULL DEFAULT 0,
+      last_error TEXT NOT NULL DEFAULT '',
+      first_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY(topic, "partition", "offset", group_id)
+    );
+---
+# ---------------------------
+# Inventory migrations ConfigMap (UP only)
+# ---------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inventory-migrations
+  namespace: quickbite
+data:
+  000001_init.up.sql: |
+    CREATE TABLE IF NOT EXISTS stock (
+      sku TEXT PRIMARY KEY,
+      available INT NOT NULL CHECK (available >= 0),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS reservations (
+      order_id BIGINT PRIMARY KEY,
+      sku TEXT NOT NULL,
+      quantity INT NOT NULL CHECK (quantity > 0),
+      reserved BOOLEAN NOT NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS outbox_events (
+      id BIGSERIAL PRIMARY KEY,
+      event_id TEXT NOT NULL UNIQUE,
+      topic TEXT NOT NULL,
+      key TEXT NOT NULL,
+      payload BYTEA NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      published_at TIMESTAMPTZ NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_outbox_unpublished
+      ON outbox_events(id)
+      WHERE published_at IS NULL;
+
+    CREATE TABLE IF NOT EXISTS processed_events (
+      event_id TEXT PRIMARY KEY,
+      processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    INSERT INTO stock(sku, available) VALUES
+      ('burger', 5),
+      ('pizza', 10)
+    ON CONFLICT (sku) DO NOTHING;
+  000002_consumer_failures.up.sql: |
+    CREATE TABLE IF NOT EXISTS consumer_failures (
+      topic TEXT NOT NULL,
+      "partition" INT NOT NULL,
+      "offset" BIGINT NOT NULL,
+      group_id TEXT NOT NULL,
+      attempts INT NOT NULL DEFAULT 0,
+      last_error TEXT NOT NULL DEFAULT '',
+      first_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY(topic, "partition", "offset", group_id)
+    );
+---
+# ---------------------------
+# Orders service
+# ---------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders
+  namespace: quickbite
+spec:
+  selector:
+    app: orders
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders
+  namespace: quickbite
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orders
+  template:
+    metadata:
+      labels:
+        app: orders
+    spec:
+      initContainers:
+        - name: wait-db
+          image: postgres:16
+          command: ["sh", "-c"]
+          args:
+            - |
+              until pg_isready -h orders-db -U postgres -d orders; do
+                echo "waiting for orders-db..."
+                sleep 2
+              done
+        - name: migrate
+          image: migrate/migrate:v4.17.1
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+          args:
+            - -path
+            - /migrations
+            - -database
+            - postgres://postgres:postgres@orders-db:5432/orders?sslmode=disable
+            - up
+      containers:
+        - name: orders
+          image: quickbite/orders:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DATABASE_URL
+              value: "postgres://postgres:postgres@orders-db:5432/orders?sslmode=disable"
+            - name: KAFKA_BROKERS
+              value: "redpanda:9092"
+            - name: INVENTORY_GRPC_ADDR
+              value: "inventory:9090"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: migrations
+          configMap:
+            name: orders-migrations
+---
+# ---------------------------
+# Inventory service
+# ---------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory
+  namespace: quickbite
+spec:
+  selector:
+    app: inventory
+  ports:
+    - name: grpc
+      port: 9090
+      targetPort: 9090
+    - name: metrics
+      port: 8081
+      targetPort: 8081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory
+  namespace: quickbite
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inventory
+  template:
+    metadata:
+      labels:
+        app: inventory
+    spec:
+      initContainers:
+        - name: wait-db
+          image: postgres:16
+          command: ["sh", "-c"]
+          args:
+            - |
+              until pg_isready -h inventory-db -U postgres -d inventory; do
+                echo "waiting for inventory-db..."
+                sleep 2
+              done
+        - name: migrate
+          image: migrate/migrate:v4.17.1
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+          args:
+            - -path
+            - /migrations
+            - -database
+            - postgres://postgres:postgres@inventory-db:5432/inventory?sslmode=disable
+            - up
+      containers:
+        - name: inventory
+          image: quickbite/inventory:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9090
+            - containerPort: 8081
+          env:
+            - name: GRPC_PORT
+              value: "9090"
+            - name: METRICS_PORT
+              value: "8081"
+            - name: DATABASE_URL
+              value: "postgres://postgres:postgres@inventory-db:5432/inventory?sslmode=disable"
+            - name: KAFKA_BROKERS
+              value: "redpanda:9092"
+          readinessProbe:
+            tcpSocket:
+              port: 9090
+            initialDelaySeconds: 3
+            periodSeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: migrations
+          configMap:
+            name: inventory-migrations

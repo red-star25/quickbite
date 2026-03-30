@@ -1,9 +1,13 @@
+# Build context MUST be the repository root (parent of services/), not services/orders.
+# Example: docker build -f services/orders/Dockerfile .
+#          docker compose build orders   (compose sets context to .)
+#
 # 1) Build stage: compiles the Go library.
 # Start from the image that has the Go compiler. Name this stage as "builder".
 FROM golang:1.25 AS builder
 # Set the working directory in the container to /app.
 WORKDIR /app
-# Copy proto and orders module (build context is repo root).
+# Copy proto and orders module (paths are relative to repo root).
 COPY proto ./proto
 COPY services/orders/go.mod services/orders/go.sum ./services/orders/
 COPY services/orders ./services/orders

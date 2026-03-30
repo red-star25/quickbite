@@ -1,8 +1,12 @@
+# Build context MUST be the repository root (parent of services/), not services/inventory.
+# Example: docker build -f services/inventory/Dockerfile .
+#          docker compose build inventory
+#
 # 1) Build stage: compiles the Go library.
 FROM golang:1.25 AS builder
 # Set the working directory in the container to /app.
 WORKDIR /app
-# Copy proto and inventory module (build context is repo root).
+# Copy proto and inventory module (paths are relative to repo root).
 COPY proto ./proto
 # Copy go.mod and go.sum files for inventory module.
 COPY services/inventory/go.mod services/inventory/go.sum ./services/inventory/
